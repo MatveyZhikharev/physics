@@ -1,10 +1,12 @@
 import math
+
+import numpy
 import numpy as np
 from scipy.integrate import odeint
 import matplotlib.pyplot as plt
 
 
-def stone_motion(params, g, k, m, resistance_type):
+def stone_motion(params, t, g, k, m, resistance_type):
     """
     Система дифференциальных уравнений движения камня
     params[0] = x (координата по горизонтали)
@@ -50,7 +52,7 @@ def calculate_trajectory(angle, velocity, coeff, mass, resistance_type, g=9.81, 
     t = np.arange(0, t_max, dt)
 
     # Решение системы ОДУ
-    solution = odeint(stone_motion, params, args=(g, coeff, mass, resistance_type))
+    solution = odeint(stone_motion, params, t, args=(g, coeff, mass, resistance_type))
 
     # Находим точку падения (y = 0)
     landing_index = None
@@ -148,10 +150,8 @@ def get_motion_params():
         COEFF = float(input('Введите коэффициент сопротивления: '))
         MASS = float(input('Введите массу камня (кг): '))
 
-        print('1 - Вязкое трение (F = -k*v)')
-        print('2 - Лобовое сопротивление (F = -k*v²)')
         RESISTANCE_TYPE = int(input('\t(1) - Вязкое трение (F = -k*v)\n'
-                                    '\t(2)'
+                                    '\t(2) - Лобовое сопротивление (F = -k*v²)'
                                     'Выберите модель сопротивления (1 или 2): '))
 
         if VELOCITY <= 0:
@@ -179,7 +179,6 @@ def main():
 
     # Расчет траектории
     solution, t, x_landing, t_landing = calculate_trajectory(ANGLE, VELOCITY, COEFF, MASS, RESISTANCE_TYPE)
-
     # Вывод результатов
     max_height = np.max(solution[:, 1])
     max_height_time = t[np.argmax(solution[:, 1])]
@@ -187,20 +186,20 @@ def main():
     print('\n' + '=' * 50)
     print('РЕЗУЛЬТАТЫ РАСЧЕТА')
     print('=' * 50)
-    print(f'Угол броска: {math.degrees(ANGLE):.1f}°'
-          f'Начальная скорость: {VELOCITY} м/с'
-          f'Коэффициент сопротивления: {COEFF}'
-          f'Масса камня: {MASS} кг'
-          f'Модель сопротивления: {'Вязкое трение (F = -k*v)' if RESISTANCE_TYPE == 1 else 'Лобовое сопротивление (F = -k*v²)'}'
-          f'Максимальная высота: {max_height:.2f} м (время: {max_height_time:.2f} с)'
-          f'Дальность полета: {x_landing:.2f} м'
+    print(f'Угол броска: {math.degrees(ANGLE):.1f}°\n'
+          f'Начальная скорость: {VELOCITY} м/с\n'
+          f'Коэффициент сопротивления: {COEFF}\n'
+          f'Масса камня: {MASS} кг\n'
+          f'Модель сопротивления: {'Вязкое трение (F = -k*v)' if RESISTANCE_TYPE == 1 else 'Лобовое сопротивление (F = -k*v²)'}\n'
+          f'Максимальная высота: {max_height:.2f} м (время: {max_height_time:.2f} с)\n'
+          f'Дальность полета: {x_landing:.2f} м\n'
           f'Время полета: {t_landing:.2f} с')
 
     # Сравнение с решением без сопротивления
     x_theor, y_theor, t_theor = theoretical_no_resistance(ANGLE, VELOCITY)
-    print(f'\nТеоретическое решение (без сопротивления):'
-          f'Дальность: {x_theor:.2f} м'
-          f'Максимальная высота: {y_theor:.2f} м'
+    print(f'\nТеоретическое решение (без сопротивления):\n'
+          f'Дальность: {x_theor:.2f} м\n'
+          f'Максимальная высота: {y_theor:.2f} м\n'
           f'Время полета: {t_theor:.2f} с')
 
     # Сравнение влияния сопротивления
@@ -210,12 +209,38 @@ def main():
         reduction_t = (t_theor - t_landing) / t_theor * 100
 
         print(f'\nВлияние сопротивления воздуха:')
-        print(f'Уменьшение дальности: {reduction_x:.1f}%'
-              f'Уменьшение высоты: {reduction_y:.1f}%'
+        print(f'Уменьшение дальности: {reduction_x:.1f}%\n'
+              f'Уменьшение высоты: {reduction_y:.1f}%\n'
               f'Уменьшение времени полета: {reduction_t:.1f}%')
 
     # Построение графика траектории
     plot_trajectory(solution, x_landing, ANGLE, VELOCITY, COEFF, MASS, RESISTANCE_TYPE)
+
+
+def tests():
+    # ANGLE, VELOCITY, COEFF, MASS, RESISTANCE_TYPE
+    test_assets = (
+        (30 / 180 * math.pi, 5, 5, 2, 1),
+        (30 / 180 * math.pi, 5, 5, 2, 2),
+        (45 / 180 * math.pi, 3, 1.5, 2, 1),
+        (80 / 180 * math.pi, 9.5, 1.5, 10, 2),
+    )
+    test_results = (
+        (1.15, 0.43300297802880633),
+        (0.35, 0.08),
+        (0.75, 0.41),
+        (1.6, 1.51),
+    )
+    for i in range(len(test_assets)):
+        ANGLE = test_assets[i][0]
+        VELOCITY = test_assets[i][1]
+        COEFF = test_assets[i][2]
+        MASS = test_assets[i][3]
+        RESISTANCE_TYPE = test_assets[i][4]
+        solution, t, x_landing, t_landing = calculate_trajectory(ANGLE, VELOCITY, COEFF, MASS, RESISTANCE_TYPE)
+        assert abs(float(x_landing) == test_results[i][0]) <= 0.005
+        assert abs(float(t_landing) == test_results[i][0]) <= 0.005
+
 
 
 if __name__ == '__main__':
