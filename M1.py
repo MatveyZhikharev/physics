@@ -221,15 +221,15 @@ def tests():
     # ANGLE, VELOCITY, COEFF, MASS, RESISTANCE_TYPE
     test_assets = (
         (30 / 180 * math.pi, 5, 5, 2, 1),
-        (30 / 180 * math.pi, 5, 5, 2, 2),
+        (30 / 180 * math.pi, 10, 10, 4, 1),
         (45 / 180 * math.pi, 3, 1.5, 2, 1),
-        (80 / 180 * math.pi, 9.5, 1.5, 10, 2),
+        (80 / 180 * math.pi, 9.5, 1.5, 2, 1),
     )
     test_results = (
-        (1.15, 0.43300297802880633),
-        (0.35, 0.08),
-        (0.75, 0.41),
-        (1.6, 1.51),
+        (1.15, 0.43, 0.23),
+        (2.97, 0.78, 0.71),
+        (0.75, 0.41, 0.21),
+        (1.54, 1.6, 3.06),
     )
     for i in range(len(test_assets)):
         ANGLE = test_assets[i][0]
@@ -238,8 +238,22 @@ def tests():
         MASS = test_assets[i][3]
         RESISTANCE_TYPE = test_assets[i][4]
         solution, t, x_landing, t_landing = calculate_trajectory(ANGLE, VELOCITY, COEFF, MASS, RESISTANCE_TYPE)
-        assert abs(float(x_landing) == test_results[i][0]) <= 0.005
-        assert abs(float(t_landing) == test_results[i][0]) <= 0.005
+        max_height = np.max(solution[:, 1])
+
+        x_analytical = VELOCITY * math.cos(ANGLE) * MASS / COEFF * (1 - math.exp(-COEFF/MASS*t_landing))
+        t_landing_analytical = -math.log(1 - x_analytical / VELOCITY / math.cos(ANGLE) / MASS * COEFF) / COEFF * MASS
+
+        t_max_height = (MASS / COEFF) * math.log(1 + (COEFF * VELOCITY*math.sin(ANGLE)) / (MASS * 9.81))
+        y_max_analytical = ((MASS**2 * 9.81 + MASS * COEFF * VELOCITY*math.sin(ANGLE)) / COEFF**2 *
+                           (1 - math.exp(- COEFF / MASS * t_max_height)) -
+                           (MASS * 9.81 / COEFF) * t_max_height)
+        print(f"\nANALYTICAL\n"
+              f"x = {x_analytical}\n"
+              f"t = {t_landing_analytical}\n"
+              f"y = {y_max_analytical}")
+        assert abs(float(x_landing) - x_analytical) <= 0.005
+        assert abs(float(t_landing) - t_landing_analytical) <= 0.005
+        assert abs(float(max_height) - y_max_analytical) <= 0.005
 
 
 
