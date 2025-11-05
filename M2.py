@@ -1,498 +1,610 @@
-from __future__ import annotations
-
 import numpy as np
-from dataclasses import dataclass
-from typing import Tuple
-from scipy.integrate import solve_ivp
 import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
 
 
-def _safe_time_grid(t_max: float, dt: float) -> np.ndarray:
-    if t_max <= 0 or dt <= 0:
-        return np.array([0.0, max(t_max, 0.0)], dtype=float)
-    n = int(np.floor(t_max / dt))
-    t = dt * np.arange(n + 1, dtype=float)
-    if t[-1] < t_max:
-        t = np.append(t, float(t_max))
-    t = np.unique(np.round(t, 15))
-    return t
+class BilliardBall:
+    def __init__(self, mass, radius, position, velocity, color='gray'):
+        self.mass = mass
+        self.radius = radius
+        self.position = np.array(position, dtype=float)
+        self.velocity = np.array(velocity, dtype=float)
+        self.color = color
+        self.trail = [self.position.copy()]
+
+    def update(self, dt):
+        self.position += self.velocity * dt
+        self.trail.append(self.position.copy())
+        if len(self.trail) > 50:
+            self.trail.pop(0)
+
+    def distance_to(self, other):
+        return np.linalg.norm(self.position - other.position)
+
+    def is_colliding_with(self, other):
+        return self.distance_to(other) <= (self.radius + other.radius)
 
 
-def reflect_velocity(v: np.ndarray, n_unit: np.ndarray) -> np.ndarray:
-    n = n_unit / np.linalg.norm(n_unit)
-    return v - 2.0 * np.dot(v, n) * n
+class BilliardTable:
+    def __init__(self, width=2.0, height=1.0, pocket_radius=0.1):
+        self.width = width
+        self.height = height
+        self.pocket_radius = pocket_radius
+        self.pockets = [
+            (pocket_radius, pocket_radius),
+            (width - pocket_radius, pocket_radius),
+            (pocket_radius, height - pocket_radius),
+            (width - pocket_radius, height - pocket_radius),
+            (width / 2, pocket_radius),
+            (width / 2, height - pocket_radius)
+        ]
 
 
-def collide_elastic_two_spheres(
-        m1: float, m2: float,
-        x1: np.ndarray, v1: np.ndarray,
-        x2: np.ndarray, v2: np.ndarray
-) -> Tuple[np.ndarray, np.ndarray]:
-    dx = x1 - x2
-    dist2 = float(np.dot(dx, dx))
-    if dist2 == 0.0:
-        return v1.copy(), v2.copy()
-    factor1 = (2.0 * m2 / (m1 + m2)) * float(np.dot(v1 - v2, dx)) / dist2
-    factor2 = (2.0 * m1 / (m1 + m2)) * float(np.dot(v2 - v1, -dx)) / dist2
-    v1p = v1 - factor1 * dx
-    v2p = v2 - factor2 * (-dx)
-    return v1p, v2p
+class ElasticCollisionSolver:
+    def __init__(self, law_type='elastic', k=1000, exponent=1.0, damping=10.0):
+        self.law_type = law_type  # 'elastic', 'hooke', 'hertz'
+        self.k = k  # Уменьшил коэффициент для стабильности
+        self.exponent = exponent
+        self.damping = damping  # Увеличил демпфирование
+
+    def wall_collision(self, ball, table):
+        if self.law_type == 'elastic':
+            self._elastic_wall_collision(ball, table)
+        else:
+            self._deformable_wall_collision(ball, table)
+
+    def ball_collision(self, ball1, ball2):
+        if self.law_type == 'elastic':
+            self._elastic_ball_collision(ball1, ball2)
+        else:
+            self._deformable_ball_collision(ball1, ball2)
+
+    def _elastic_wall_collision(self, ball, table):
+        """Абсолютно упругое отталкивание от стенок"""
+        collision_occurred = False
+
+        if ball.position[0] - ball.radius <= 0:
+            ball.position[0] = ball.radius
+            ball.velocity[0] = -ball.velocity[0]
+            collision_occurred = True
+        elif ball.position[0] + ball.radius >= table.width:
+            ball.position[0] = table.width - ball.radius
+            ball.velocity[0] = -ball.velocity[0]
+            collision_occurred = True
+
+        if ball.position[1] - ball.radius <= 0:
+            ball.position[1] = ball.radius
+            ball.velocity[1] = -ball.velocity[1]
+            collision_occurred = True
+        elif ball.position[1] + ball.radius >= table.height:
+            ball.position[1] = table.height - ball.radius
+            ball.velocity[1] = -ball.velocity[1]
+            collision_occurred = True
+
+        return collision_occurred
+
+    def _deformable_wall_collision(self, ball, table):
+        """Отталкивание от стенок с учётом деформации"""
+        force = np.zeros(2)
+        collision_occurred = False
+
+        # Проверяем столкновения со всеми стенками
+        # Левая стенка
+        if ball.position[0] - ball.radius < 0:
+            overlap = ball.radius - ball.position[0]
+            if overlap > 0:
+                if self.law_type == 'hooke':
+                    force_magnitude = self.k * (overlap ** self.exponent)
+                else:  # hertz
+                    force_magnitude = self.k * (overlap ** 1.5)
+
+                # Демпфирование - только если шар движется в стенку
+                if ball.velocity[0] < 0:
+                    damping_force = self.damping * abs(ball.velocity[0])
+                else:
+                    damping_force = 0
+
+                total_force = force_magnitude + damping_force
+                force[0] += total_force
+                collision_occurred = True
+
+        # Правая стенка
+        if ball.position[0] + ball.radius > table.width:
+            overlap = ball.position[0] + ball.radius - table.width
+            if overlap > 0:
+                if self.law_type == 'hooke':
+                    force_magnitude = self.k * (overlap ** self.exponent)
+                else:  # hertz
+                    force_magnitude = self.k * (overlap ** 1.5)
+
+                # Демпфирование - только если шар движется в стенку
+                if ball.velocity[0] > 0:
+                    damping_force = self.damping * abs(ball.velocity[0])
+                else:
+                    damping_force = 0
+
+                total_force = force_magnitude + damping_force
+                force[0] -= total_force
+                collision_occurred = True
+
+        # Нижняя стенка
+        if ball.position[1] - ball.radius < 0:
+            overlap = ball.radius - ball.position[1]
+            if overlap > 0:
+                if self.law_type == 'hooke':
+                    force_magnitude = self.k * (overlap ** self.exponent)
+                else:  # hertz
+                    force_magnitude = self.k * (overlap ** 1.5)
+
+                # Демпфирование - только если шар движется в стенку
+                if ball.velocity[1] < 0:
+                    damping_force = self.damping * abs(ball.velocity[1])
+                else:
+                    damping_force = 0
+
+                total_force = force_magnitude + damping_force
+                force[1] += total_force
+                collision_occurred = True
+
+        # Верхняя стенка
+        if ball.position[1] + ball.radius > table.height:
+            overlap = ball.position[1] + ball.radius - table.height
+            if overlap > 0:
+                if self.law_type == 'hooke':
+                    force_magnitude = self.k * (overlap ** self.exponent)
+                else:  # hertz
+                    force_magnitude = self.k * (overlap ** 1.5)
+
+                # Демпфирование - только если шар движется в стенку
+                if ball.velocity[1] > 0:
+                    damping_force = self.damping * abs(ball.velocity[1])
+                else:
+                    damping_force = 0
+
+                total_force = force_magnitude + damping_force
+                force[1] -= total_force
+                collision_occurred = True
+
+        # Применяем силу (F = ma)
+        if np.linalg.norm(force) > 0:
+            acceleration = force / ball.mass
+            ball.velocity -= acceleration * 0.001  # Уменьшил шаг интегрирования
+
+        return collision_occurred
+
+    def _elastic_ball_collision(self, ball1, ball2):
+        """Абсолютно упругое столкновение шаров"""
+        if not ball1.is_colliding_with(ball2):
+            return
+
+        collision_vector = ball2.position - ball1.position
+        distance = np.linalg.norm(collision_vector)
+
+        if distance == 0:
+            return
+
+        collision_normal = collision_vector / distance
+
+        v1n = np.dot(ball1.velocity, collision_normal)
+        v2n = np.dot(ball2.velocity, collision_normal)
+
+        # Только если шары сближаются
+        if v1n - v2n <= 0:
+            return
+
+        m1, m2 = ball1.mass, ball2.mass
+        v1n_new = (v1n * (m1 - m2) + 2 * m2 * v2n) / (m1 + m2)
+        v2n_new = (v2n * (m2 - m1) + 2 * m1 * v1n) / (m1 + m2)
+
+        ball1.velocity += (v1n_new - v1n) * collision_normal
+        ball2.velocity += (v2n_new - v2n) * collision_normal
+
+        # Разделяем шары, чтобы избежать залипания
+        overlap = ball1.radius + ball2.radius - distance
+        if overlap > 0:
+            separation = overlap * 0.5
+            ball1.position -= separation * collision_normal
+            ball2.position += separation * collision_normal
+
+    def _deformable_ball_collision(self, ball1, ball2):
+        """Столкновение шаров с учётом деформации"""
+        if not ball1.is_colliding_with(ball2):
+            return
+
+        r_vec = ball2.position - ball1.position
+        distance = np.linalg.norm(r_vec)
+
+        if distance == 0:
+            return
+
+        overlap = ball1.radius + ball2.radius - distance
+
+        if overlap <= 0:
+            return
+
+        normal = r_vec / distance
+
+        # Проверяем, что шары сближаются
+        relative_velocity = np.dot(ball2.velocity - ball1.velocity, normal)
+        if relative_velocity > 0:  # Шары удаляются друг от друга
+            return
+
+        # Сила по закону Гука или Герца
+        if self.law_type == 'hooke':
+            force_magnitude = self.k * (overlap ** self.exponent)
+        else:  # hertz
+            force_magnitude = self.k * (overlap ** 1.5)
+
+        # Демпфирование
+        damping_force = self.damping * abs(relative_velocity)
+
+        total_force = (force_magnitude + damping_force) * normal
+
+        # Применяем силу (F = ma)
+        ball1.velocity += (total_force / ball1.mass) * 0.001  # Уменьшил шаг
+        ball2.velocity -= (total_force / ball2.mass) * 0.001
+
+        # Легкое разделение шаров для стабильности
+        separation = overlap * 0.05  # Уменьшил коэффициент разделения
+        ball1.position -= separation * normal
+        ball2.position += separation * normal
 
 
-@dataclass
-class Ball:
-    m: float
-    R: float
-    x: np.ndarray
-    v: np.ndarray
+class BilliardGame:
+    def __init__(self, law_type='elastic', k=1000, exponent=1.0, damping=10.0):
+        self.table = BilliardTable()
+        self.balls = []
+        self.collision_solver = ElasticCollisionSolver(law_type, k, exponent, damping)
+        self.time = 0
+        self.dt = 0.01
+        # Для сохранения истории
+        self.history = {
+            'time': [],
+            'positions': [],
+            'velocities': [],
+            'energy': [],
+            'momentum': []
+        }
 
+    def setup_game(self, ball1_params, ball2_params):
+        self.balls = []
+        self.history = {'time': [], 'positions': [], 'velocities': [], 'energy': [], 'momentum': []}
 
-def contact_force(delta: float, n_unit: np.ndarray, k: float, p: float) -> np.ndarray:
-    if delta <= 0.0:
-        return np.zeros_like(n_unit)
-    return (k * (delta ** p)) * n_unit
+        # Биток
+        cue_ball = BilliardBall(
+            mass=ball1_params['mass'],
+            radius=ball1_params['radius'],
+            position=ball1_params['position'],
+            velocity=ball1_params['velocity'],
+            color=ball1_params['color']
+        )
+        self.add_ball(cue_ball)
 
+        # Целевой шар
+        target_ball = BilliardBall(
+            mass=ball2_params['mass'],
+            radius=ball2_params['radius'],
+            position=ball2_params['position'],
+            velocity=ball2_params['velocity'],
+            color=ball2_params['color']
+        )
+        self.add_ball(target_ball)
 
-def potential_energy(delta: float, k: float, p: float) -> float:
-    if delta <= 0.0:
-        return 0.0
-    return k * (delta ** (p + 1.0)) / (p + 1.0)
+    def add_ball(self, ball):
+        self.balls.append(ball)
 
+    def calculate_energy(self):
+        """Вычисление полной кинетической энергии системы"""
+        total_energy = 0
+        for ball in self.balls:
+            total_energy += 0.5 * ball.mass * np.dot(ball.velocity, ball.velocity)
+        return total_energy
 
-def potential_energy_vec(delta_vec: np.ndarray, k: float, p: float) -> np.ndarray:
-    U = np.zeros_like(delta_vec)
-    mask = delta_vec > 0.0
-    U[mask] = k * delta_vec[mask] ** (p + 1.0) / (p + 1.0)
-    return U
+    def calculate_momentum(self):
+        """Вычисление полного импульса системы"""
+        total_momentum = np.zeros(2)
+        for ball in self.balls:
+            total_momentum += ball.mass * ball.velocity
+        return total_momentum
 
+    def update(self):
+        # Обновляем позиции
+        for ball in self.balls:
+            ball.update(self.dt)
 
-def two_ball_ode(
-        t: float, y: np.ndarray, m1: float, m2: float, R1: float, R2: float, k: float, p: float
-) -> np.ndarray:
-    x1 = y[0:2]
-    v1 = y[2:4]
-    x2 = y[4:6]
-    v2 = y[6:8]
-    r = x1 - x2
-    dist = float(np.linalg.norm(r))
-    delta = (R1 + R2) - dist
-    if dist > 0.0:
-        n = r / dist
-    else:
-        n = np.array([1.0, 0.0])
-    F = contact_force(delta, n, k, p)
-    a1 = -F / m1
-    a2 = F / m2
-    return np.hstack([v1, a1, v2, a2])
+        # Обрабатываем столкновения со стенками
+        for ball in self.balls:
+            self.collision_solver.wall_collision(ball, self.table)
 
+        # Обрабатываем столкновения между шарами
+        for i in range(len(self.balls)):
+            for j in range(i + 1, len(self.balls)):
+                self.collision_solver.ball_collision(self.balls[i], self.balls[j])
 
-def simulate_two_balls(
-        b1: Ball, b2: Ball,
-        k: float = 5e5, p: float = 1.5,
-        t_max: float = 0.01, dt: float = 2e-6,
-        rtol: float = 1e-8, atol: float = 1e-10,
-        method: str = "RK45"
-):
-    y0 = np.hstack([b1.x, b1.v, b2.x, b2.v])
-    t_eval = _safe_time_grid(t_max, dt)
-    sol = solve_ivp(
-        two_ball_ode, (0.0, t_max), y0,
-        t_eval=t_eval, rtol=rtol, atol=atol, max_step=dt, method=method,
-        args=(b1.m, b2.m, b1.R, b2.R, k, p)
-    )
-    Y = sol.y.T
-    x1 = Y[:, 0:2]
-    v1 = Y[:, 2:4]
-    x2 = Y[:, 4:6]
-    v2 = Y[:, 6:8]
-    r = x1 - x2
-    dist = np.linalg.norm(r, axis=1)
-    delta = np.maximum((b1.R + b2.R) - dist, 0.0)
-    KE = 0.5 * b1.m * np.sum(v1 ** 2, axis=1) + 0.5 * b2.m * np.sum(v2 ** 2, axis=1)
-    U = potential_energy_vec(delta, k, p)
-    E = KE + U
-    P = b1.m * v1 + b2.m * v2
-    return sol.t, x1, v1, x2, v2, delta, E, P
+        # Сохраняем данные
+        self.history['time'].append(self.time)
+        self.history['positions'].append([ball.position.copy() for ball in self.balls])
+        self.history['velocities'].append([ball.velocity.copy() for ball in self.balls])
+        self.history['energy'].append(self.calculate_energy())
+        self.history['momentum'].append(self.calculate_momentum())
 
-
-def wall_contact_force(
-        x: np.ndarray, R: float, n_unit: np.ndarray, x0_on_plane: np.ndarray, k: float, p: float
-) -> np.ndarray:
-    n = n_unit / np.linalg.norm(n_unit)
-    s = float(np.dot(x - x0_on_plane, n))
-    delta = R - s
-    if delta <= 0.0:
-        return np.zeros_like(n)
-    return (k * (delta ** p)) * n
-
-
-def simulate_ball_wall(
-        m: float = 0.17, R: float = 0.0285,
-        x: np.ndarray = np.array([0.10, 0.0]),
-        v: np.ndarray = np.array([-3.0, 0.4]),
-        n_unit: np.ndarray = np.array([1.0, 0.0]),
-        x0_on_plane: np.ndarray = np.array([0.0, 0.0]),
-        k: float = 1e6, p: float = 1.5,
-        t_max: float = 0.01, dt: float = 2e-6,
-        rtol: float = 1e-8, atol: float = 1e-10,
-        method: str = "RK45"
-):
-    def ode(t, y):
-        x_ = y[:2]
-        v_ = y[2:]
-        F = wall_contact_force(x_, R, n_unit, x0_on_plane, k, p)
-        a = F / m
-        return np.hstack([v_, a])
-
-    y0 = np.hstack([x, v])
-    t_eval = _safe_time_grid(t_max, dt)
-    sol = solve_ivp(
-        ode, (0.0, t_max), y0,
-        t_eval=t_eval, rtol=rtol, atol=atol, max_step=dt, method=method
-    )
-    X = sol.y[:2, :].T
-    V = sol.y[2:, :].T
-    KE = 0.5 * m * np.sum(V ** 2, axis=1)
-    return sol.t, X, V, KE
-
-
-def relative_energy_drift(E: np.ndarray) -> float:
-    e0 = max(float(E[0]), 1e-16)
-    return (float(np.max(E)) - float(np.min(E))) / e0
-
-
-def momentum_drift(P: np.ndarray) -> float:
-    return float(np.linalg.norm(P[-1] - P[0]))
-
-
-def run_autotests(verbose: bool = True) -> None:
-    tests = [
-        (0.17, 0.17, [-0.06, 0.0], [2.5, 0.0], [0.06, 0.0], [0.0, 0.0], 5e5, 0.006, 2e-4, 2e-6),
-        (0.20, 0.10, [-0.06, -0.005], [2.2, 0.3], [0.06, 0.004], [0.0, 0.0], 8e5, 0.008, 2e-4, 5e-6)
-    ]
-
-    for i, (m1, m2, x1, v1, x2, v2, k, t_max, tol_E, tol_P) in enumerate(tests, 1):
-        b1 = Ball(m1, 0.0285, np.array(x1), np.array(v1))
-        b2 = Ball(m2, 0.0285, np.array(x2), np.array(v2))
-        t, x1_sim, v1_sim, x2_sim, v2_sim, delta, E, P = simulate_two_balls(b1, b2, k=k, t_max=t_max)
-        energy_drift = relative_energy_drift(E)
-        momentum_drift_val = momentum_drift(P)
-        assert energy_drift < tol_E, f"Тест{i} энергия: {energy_drift:.2e} >= {tol_E:.2e}"
-        assert momentum_drift_val < tol_P, f"Тест{i} импульс: {momentum_drift_val:.2e} >= {tol_P:.2e}"
-        if verbose:
-            print(f"[OK] Тест{i}: энергия/импульс в норме (дрейф: {energy_drift:.2e})")
-
-    v_in = np.array([-1.0, 0.2])
-    t, X, V, KE = simulate_ball_wall(x=np.array([0.05, 0.0]), v=v_in, k=1e6, p=1.0, t_max=0.05)
-    assert X[-1, 0] > X[0, 0], "Шар не отлетел от стенки"
-    assert abs(V[-1, 1] - v_in[1]) < 0.05, "Тангенциальная компонента изменилась"
-    assert np.sign(V[-1, 0]) != np.sign(v_in[0]), "Нормальная компонента не изменила знак"
-    if verbose:
-        print("[OK] Тест3: отражение о стенку")
-        print("Все автотесты пройдены успешно.")
-
-
-def validate_float_input(prompt, default, min_val=None, max_val=None):
-    while True:
-        try:
-            value = input(prompt).strip()
-            if not value:
-                value = default
-            else:
-                value = float(value)
-
-            if min_val is not None and value < min_val:
-                print(f"Ошибка: значение должно быть не меньше {min_val}")
-                continue
-            if max_val is not None and value > max_val:
-                print(f"Ошибка: значение должно быть не больше {max_val}")
-                continue
-
-            return value
-        except ValueError:
-            print("Ошибка: введите корректное число")
-
-
-def validate_vector_input(prompt, default, min_val=None, max_val=None):
-    while True:
-        try:
-            value = input(prompt).strip()
-            if not value:
-                values = default
-            else:
-                values = list(map(float, value.split()))
-                if len(values) != 2:
-                    print("Ошибка: введите два числа через пробел")
-                    continue
-
-            if min_val is not None:
-                if any(v < min_val for v in values):
-                    print(f"Ошибка: все значения должны быть не меньше {min_val}")
-                    continue
-            if max_val is not None:
-                if any(v > max_val for v in values):
-                    print(f"Ошибка: все значения должны быть не больше {max_val}")
-                    continue
-
-            return values
-        except ValueError:
-            print("Ошибка: введите корректные числа")
+        self.time += self.dt
 
 
 def get_user_input():
-    print("\n" + "=" * 50)
-    print("МОДЕЛИРОВАНИЕ СТОЛКНОВЕНИЙ БИЛЬЯРДНЫХ ШАРОВ")
-    print("=" * 50)
+    """Получение параметров от пользователя"""
+    print("=== НАСТРОЙКА ПАРАМЕТРОВ БИЛЬЯРДА ===")
 
-    print("\nВыберите тип моделирования:")
-    print("1. Столкновение двух шаров")
-    print("2. Отражение шара от стенки")
+    # Выбор закона физики
+    print("\nВыберите закон физики:")
+    print("1 - Абсолютно упругие столкновения (рекомендуется)")
+    print("2 - Закон Гука (F ∼ -Δx)")
+    print("3 - Закон Герца (F ∼ -Δx³/²)")
 
-    while True:
-        choice = input("Ваш выбор (1 или 2): ").strip()
-        if choice in ['1', '2']:
-            break
-        print("Ошибка: введите 1 или 2")
+    law_choice = input("Ваш выбор (1-3): ").strip()
+    law_types = {'1': 'elastic', '2': 'hooke', '3': 'hertz'}
+    law_type = law_types.get(law_choice, 'elastic')
 
-    print("\n--- Общие параметры ---")
-    m = validate_float_input("Масса шара (кг) [0.17]: ", 0.17, min_val=0.001, max_val=10.0)
-    R = validate_float_input("Радиус шара (м) [0.0285]: ", 0.0285, min_val=0.001, max_val=0.04)
+    # Более стабильные параметры по умолчанию
+    k = 1000 if law_type != 'elastic' else 0
+    exponent = 1.0
+    damping = 10.0 if law_type != 'elastic' else 0
 
-    if choice == "1":
-        print("\n--- Параметры первого шара ---")
-        x1 = validate_vector_input("Начальная позиция (x y) [-0.06 0.0]: ", [-0.06, 0.0], min_val=-1.0, max_val=1.0)
-        v1 = validate_vector_input("Начальная скорость (vx vy) [2.5 0.0]: ", [2.5, 0.0], min_val=-50.0, max_val=50.0)
+    if law_type != 'elastic':
+        try:
+            k = float(input(f"Коэффициент упругости k (по умолчанию {k}): ") or str(k))
+            if law_type == 'hooke':
+                exponent = float(input("Показатель степени (по умолчанию 1.0): ") or "1.0")
+            damping = float(input(f"Коэффициент демпфирования (по умолчанию {damping}): ") or str(damping))
+        except ValueError:
+            print("Использую значения по умолчанию")
 
-        print("\n--- Параметры второго шара ---")
-        x2 = validate_vector_input("Начальная позиция (x y) [0.06 0.0]: ", [0.06, 0.0], min_val=-1.0, max_val=1.0)
-        v2 = validate_vector_input("Начальная скорость (vx vy) [0.0 0.0]: ", [0.0, 0.0], min_val=-50.0, max_val=50.0)
+    # Параметры первого шара (битка)
+    print("\n=== ПАРАМЕТРЫ ПЕРВОГО ШАРА (БИТОК) ===")
+    ball1_params = {}
 
-        dist = np.linalg.norm(np.array(x1) - np.array(x2))
-        if dist < 2 * R:
-            print(f"Предупреждение: шары изначально перекрываются (расстояние {dist:.3f} < {2 * R:.3f})")
+    ball1_params['mass'] = float(input("Масса (по умолчанию 1.0): ") or "1.0")
+    ball1_params['radius'] = float(input("Радиус (по умолчанию 0.05): ") or "0.05")
 
-        return {
-            'type': 'two_balls',
-            'm': m, 'R': R,
-            'ball1': {'x': np.array(x1), 'v': np.array(v1)},
-            'ball2': {'x': np.array(x2), 'v': np.array(v2)}
-        }
+    print("Начальная позиция (x y):")
+    pos_input = input("По умолчанию 0.3 0.5: ") or "0.3 0.5"
+    ball1_params['position'] = list(map(float, pos_input.split()))
 
-    else:
-        print("\n--- Параметры шара ---")
-        x = validate_vector_input("Начальная позиция (x y) [0.05 0.0]: ", [0.05, 0.0], min_val=-1.0, max_val=1.0)
-        v = validate_vector_input("Начальная скорость (vx vy) [-1.0 0.2]: ", [-1.0, 0.2], min_val=-50.0, max_val=50.0)
+    print("Начальная скорость (vx vy):")
+    vel_input = input("По умолчанию 2.0 0.2: ") or "2.0 0.2"  # Уменьшил скорость
+    ball1_params['velocity'] = list(map(float, vel_input.split()))
 
-        print("\n--- Параметры стенки ---")
-        wall_norm = validate_vector_input("Нормаль стенки (nx ny) [1.0 0.0]: ", [1.0, 0.0], min_val=-1.0, max_val=1.0)
-        wall_pos = validate_float_input("Позиция стенки по x [0.0]: ", 0.0, min_val=-1.0, max_val=1.0)
+    color_input = input("Цвет (по умолчанию gray): ") or "gray"
+    ball1_params['color'] = color_input.lower()
 
-        wall_norm = np.array(wall_norm)
-        wall_norm = wall_norm / np.linalg.norm(wall_norm)
+    # Параметры второго шара
+    print("\n=== ПАРАМЕТРЫ ВТОРОГО ШАРА ===")
+    ball2_params = {}
 
-        return {
-            'type': 'ball_wall',
-            'm': m, 'R': R,
-            'ball': {'x': np.array(x), 'v': np.array(v)},
-            'wall': {'normal': wall_norm, 'position': wall_pos}
-        }
+    ball2_params['mass'] = float(input("Масса (по умолчанию 1.0): ") or "1.0")
+    ball2_params['radius'] = float(input("Радиус (по умолчанию 0.05): ") or "0.05")
 
+    print("Начальная позиция (x y):")
+    pos_input = input("По умолчанию 1.5 0.5: ") or "1.5 0.5"
+    ball2_params['position'] = list(map(float, pos_input.split()))
 
-def get_simulation_params():
-    print("\n--- Параметры симуляции ---")
+    print("Начальная скорость (vx vy):")
+    vel_input = input("По умолчанию 0.0 0.0: ") or "0.0 0.0"
+    ball2_params['velocity'] = list(map(float, vel_input.split()))
 
-    print("Выберите закон контакта:")
-    print("1. Закон Гука (F ~ Δx)")
-    print("2. Закон Герца (F ~ Δx^(3/2))")
+    color_input = input("Цвет (по умолчанию red): ") or "red"
+    ball2_params['color'] = color_input.lower()
 
-    while True:
-        law_choice = input("Ваш выбор (1 или 2): ").strip()
-        if law_choice in ['1', '2']:
-            break
-        print("Ошибка: введите 1 или 2")
-
-    p = 1.0 if law_choice == "1" else 1.5
-
-    default_k = 5e5 if p == 1.5 else 1e6
-    k = validate_float_input(f"Коэффициент жесткости [{default_k:.0e}]: ", default_k, min_val=1e3, max_val=1e9)
-
-    t_max = validate_float_input("Время моделирования (с) [0.01]: ", 0.01, min_val=0.001, max_val=0.1)
-
-    return {'p': p, 'k': k, 't_max': t_max}
+    return law_type, k, exponent, damping, ball1_params, ball2_params
 
 
-def plot_billiard_table(results, params, sim_params):
-    fig, axes = plt.subplots(1, 2, figsize=(15, 6))
-    ax_traj, ax_energy = axes
+def analyze_and_plot_results(game):
+    """Анализ результатов и построение графиков"""
+    print("\n" + "=" * 60)
+    print("АНАЛИЗ РЕЗУЛЬТАТОВ СИМУЛЯЦИИ")
+    print("=" * 60)
 
-    colors = {
-        'table': '#2E8B57', 'ball1': '#1f77b4', 'ball2': '#ff7f0e',
-        'wall': '#8B4513', 'collision': '#d62728', 'text_bg': 'lightblue', 'params_bg': 'lightyellow'
-    }
+    # Извлекаем данные из истории
+    time = np.array(game.history['time'])
+    energy = np.array(game.history['energy'])
+    momentum = np.array(game.history['momentum'])
+    positions = np.array(game.history['positions'])
 
-    table = plt.Rectangle((-0.1, -0.1), 0.2, 0.2, fill=True,
-                          facecolor=colors['table'], alpha=0.2, linewidth=3, edgecolor='black')
-    ax_traj.add_patch(table)
+    # Вычисляем основные характеристики
+    initial_energy = energy[0]
+    final_energy = energy[-1]
+    energy_change = abs(final_energy - initial_energy) / initial_energy * 100
 
-    if params['type'] == 'two_balls':
-        t, x1, v1, x2, v2, delta, E, P = results
+    initial_momentum = np.linalg.norm(momentum[0])
+    final_momentum = np.linalg.norm(momentum[-1])
+    momentum_change = abs(final_momentum - initial_momentum) / initial_momentum * 100
 
-        ax_traj.plot(x1[:, 0], x1[:, 1], '-', color=colors['ball1'], linewidth=2, label='Шар 1')
-        ax_traj.plot(x2[:, 0], x2[:, 1], '-', color=colors['ball2'], linewidth=2, label='Шар 2')
+    # Вывод вычисленных значений
+    print(f"\nЭНЕРГЕТИЧЕСКИЕ ХАРАКТЕРИСТИКИ:")
+    print(f"Начальная энергия системы: {initial_energy:.6f} Дж")
+    print(f"Конечная энергия системы: {final_energy:.6f} Дж")
+    print(f"Изменение энергии: {energy_change:.4f}%")
+    print(f"Сохранение энергии: {100 - energy_change:.4f}%")
 
-        ax_traj.plot(x1[0, 0], x1[0, 1], 'o', color=colors['ball1'], markersize=8,
-                     markeredgecolor='black', markeredgewidth=1, label='Начало шар 1')
-        ax_traj.plot(x2[0, 0], x2[0, 1], 'o', color=colors['ball2'], markersize=8,
-                     markeredgecolor='black', markeredgewidth=1, label='Начало шар 2')
-        ax_traj.plot(x1[-1, 0], x1[-1, 1], 's', color=colors['ball1'], markersize=6,
-                     markeredgecolor='black', markeredgewidth=1, label='Конец шар 1')
-        ax_traj.plot(x2[-1, 0], x2[-1, 1], 's', color=colors['ball2'], markersize=6,
-                     markeredgecolor='black', markeredgewidth=1, label='Конец шар 2')
+    print(f"\nИМПУЛЬСНЫЕ ХАРАКТЕРИСТИКИ:")
+    print(f"Начальный импульс системы: {initial_momentum:.6f} кг·м/с")
+    print(f"Конечный импульс системы: {final_momentum:.6f} кг·м/с")
+    print(f"Изменение импульса: {momentum_change:.4f}%")
+    print(f"Сохранение импульса: {100 - momentum_change:.4f}%")
 
-        collision_idx = np.argmax(delta > 0)
-        if 0 < collision_idx < len(x1):
-            cx = (x1[collision_idx, 0] + x2[collision_idx, 0]) / 2
-            cy = (x1[collision_idx, 1] + x2[collision_idx, 1]) / 2
-            ax_traj.plot(cx, cy, '*', color=colors['collision'], markersize=10,
-                         markeredgecolor='black', markeredgewidth=1, label='Столкновение')
+    # Анализ столкновений
+    velocities = np.array(game.history['velocities'])
+    ball1_v = velocities[:, 0]  # Скорости первого шара
+    ball2_v = velocities[:, 1]  # Скорости второго шара
 
-        KE_ball1 = 0.5 * params['m'] * np.sum(v1 ** 2, axis=1)
-        KE_ball2 = 0.5 * params['m'] * np.sum(v2 ** 2, axis=1)
-        KE_total = KE_ball1 + KE_ball2
-        U = potential_energy_vec(delta, sim_params['k'], sim_params['p'])
+    # Находим момент столкновения (когда скорости резко меняются)
+    ball1_speed_change = np.linalg.norm(np.diff(ball1_v, axis=0), axis=1)
+    collision_time_idx = np.argmax(ball1_speed_change) + 1 if len(ball1_speed_change) > 0 else 0
 
-        ax_energy.plot(t * 1000, KE_total, 'g-', linewidth=2, label='Кинетическая')
-        ax_energy.plot(t * 1000, U, 'r-', linewidth=2, label='Потенциальная')
-        ax_energy.plot(t * 1000, E, 'b-', linewidth=2, label='Полная')
+    if collision_time_idx > 0 and collision_time_idx < len(time):
+        collision_time = time[collision_time_idx]
+        print(f"\nМомент столкновения: {collision_time:.3f} с")
 
-        if 0 < collision_idx < len(t):
-            ax_energy.axvline(x=t[collision_idx] * 1000, color='red', linestyle='--',
-                              alpha=0.7, label='Столкновение')
+        # Скорости до и после столкновения
+        v1_before = ball1_v[collision_time_idx - 1]
+        v2_before = ball2_v[collision_time_idx - 1]
+        v1_after = ball1_v[collision_time_idx]
+        v2_after = ball2_v[collision_time_idx]
 
-        energy_drift = relative_energy_drift(E)
-        momentum_drift_val = momentum_drift(P)
-        info_text = f"""РЕЗУЛЬТАТЫ СТОЛКНОВЕНИЯ:
+        print(f"Скорость шара 1 до столкновения: ({v1_before[0]:.3f}, {v1_before[1]:.3f}) м/с")
+        print(f"Скорость шара 2 до столкновения: ({v2_before[0]:.3f}, {v2_before[1]:.3f}) м/с")
+        print(f"Скорость шара 1 после столкновения: ({v1_after[0]:.3f}, {v1_after[1]:.3f}) м/с")
+        print(f"Скорость шара 2 после столкновения: ({v2_after[0]:.3f}, {v2_after[1]:.3f}) м/с")
 
-ЭНЕРГИЯ:
-Начальная: {E[0]:.4f} Дж
-Конечная: {E[-1]:.4f} Дж
-Дрейф: {energy_drift:.2e}
+    # Построение графиков
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
 
-ИМПУЛЬС:
-Изменение: {momentum_drift_val:.2e}
+    # График 1: Траектории шаров
+    ball1_pos = positions[:, 0]
+    ball2_pos = positions[:, 1]
 
-СКОРОСТИ:
-Шар 1: {np.linalg.norm(v1[-1]):.2f} м/с
-Шар 2: {np.linalg.norm(v2[-1]):.2f} м/с"""
+    ax1.plot(ball1_pos[:, 0], ball1_pos[:, 1], 'b-', label='Шар 1', linewidth=2, alpha=0.7)
+    ax1.plot(ball2_pos[:, 0], ball2_pos[:, 1], 'r-', label='Шар 2', linewidth=2, alpha=0.7)
+    ax1.scatter(ball1_pos[0, 0], ball1_pos[0, 1], c='blue', s=100, marker='o', label='Начало шар 1')
+    ax1.scatter(ball2_pos[0, 0], ball2_pos[0, 1], c='red', s=100, marker='o', label='Начало шар 2')
+    ax1.scatter(ball1_pos[-1, 0], ball1_pos[-1, 1], c='blue', s=100, marker='s', label='Конец шар 1')
+    ax1.scatter(ball2_pos[-1, 0], ball2_pos[-1, 1], c='red', s=100, marker='s', label='Конец шар 2')
 
-    else:
-        t, X, V, KE = results
+    ax1.set_xlim(0, game.table.width)
+    ax1.set_ylim(0, game.table.height)
+    ax1.set_aspect('equal')
+    ax1.set_xlabel('X координата (м)')
+    ax1.set_ylabel('Y координата (м)')
+    ax1.set_title('Траектории движения шаров')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
 
-        ax_traj.plot(X[:, 0], X[:, 1], '-', color=colors['ball1'], linewidth=2, label='Траектория')
-        ax_traj.plot(X[0, 0], X[0, 1], 'o', color=colors['ball1'], markersize=8,
-                     markeredgecolor='black', markeredgewidth=1, label='Начало')
-        ax_traj.plot(X[-1, 0], X[-1, 1], 's', color=colors['ball1'], markersize=6,
-                     markeredgecolor='black', markeredgewidth=1, label='Конец')
+    # График 2: Сохранение энергии
+    ax2.plot(time, energy, 'g-', linewidth=2)
+    ax2.axhline(y=initial_energy, color='r', linestyle='--', alpha=0.7, label='Начальная энергия')
+    ax2.set_xlabel('Время (с)')
+    ax2.set_ylabel('Энергия (Дж)')
+    ax2.set_title('Сохранение кинетической энергии')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
 
-        wall_norm = params['wall']['normal']
-        wall_pos = params['wall']['position']
-        if abs(wall_norm[0]) > 0.5:
-            ax_traj.axvline(x=wall_pos, color=colors['wall'], linewidth=3, label='Стенка')
-        else:
-            ax_traj.axhline(y=wall_pos, color=colors['wall'], linewidth=3, label='Стенка')
+    # График 3: Сохранение импульса
+    momentum_magnitude = np.linalg.norm(momentum, axis=1)
+    ax3.plot(time, momentum_magnitude, 'purple', linewidth=2)
+    ax3.axhline(y=initial_momentum, color='r', linestyle='--', alpha=0.7, label='Начальный импульс')
+    ax3.set_xlabel('Время (с)')
+    ax3.set_ylabel('Импульс (кг·м/с)')
+    ax3.set_title('Сохранение импульса системы')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
 
-        ax_energy.plot(t * 1000, KE, 'b-', linewidth=2, label='Кинетическая')
+    # График 4: Скорости шаров
+    ball1_speed = np.linalg.norm(ball1_v, axis=1)
+    ball2_speed = np.linalg.norm(ball2_v, axis=1)
 
-        energy_drift = (np.max(KE) - np.min(KE)) / np.max(KE)
-        v_final = np.linalg.norm(V[-1])
-        energy_loss = 100 * (KE[0] - KE[-1]) / KE[0] if KE[0] > 0 else 0
-
-        info_text = f"""РЕЗУЛЬТАТЫ ОТРАЖЕНИЯ:
-
-ЭНЕРГИЯ:
-Начальная: {KE[0]:.4f} Дж
-Конечная: {KE[-1]:.4f} Дж  
-Потери: {energy_loss:.1f}%
-
-СКОРОСТЬ:
-Конечная: {v_final:.2f} м/с"""
-
-    ax_traj.set_xlim(-0.1, 0.1)
-    ax_traj.set_ylim(-0.1, 0.1)
-    ax_traj.set_aspect('equal')
-    ax_traj.grid(True, alpha=0.3)
-    ax_traj.set_xlabel('X (м)')
-    ax_traj.set_ylabel('Y (м)')
-
-    law_name = "Гука" if sim_params['p'] == 1.0 else "Герца"
-    ax_traj.set_title(f'ТРАЕКТОРИИ ({law_name})')
-    ax_traj.legend()
-
-    ax_energy.set_xlabel('Время (мс)')
-    ax_energy.set_ylabel('Энергия (Дж)')
-    ax_energy.set_title('ЭНЕРГИЯ')
-    ax_energy.legend()
-    ax_energy.grid(True, alpha=0.3)
-
-    ax_traj.text(0.02, 0.98, info_text, transform=ax_traj.transAxes, fontsize=8,
-                 verticalalignment='top', bbox=dict(boxstyle='round', facecolor=colors['text_bg'], alpha=0.8))
-
-    sim_info = f"""ПАРАМЕТРЫ:
-Закон: {law_name}
-k = {sim_params['k']:.0e} Н/м
-t = {sim_params['t_max']} с
-m = {params['m']} кг
-R = {params['R']} м"""
-
-    ax_energy.text(0.98, 0.98, sim_info, transform=ax_energy.transAxes, fontsize=8,
-                   verticalalignment='top', horizontalalignment='right',
-                   bbox=dict(boxstyle='round', facecolor=colors['params_bg'], alpha=0.8))
+    ax4.plot(time, ball1_speed, 'b-', label='Шар 1', linewidth=2)
+    ax4.plot(time, ball2_speed, 'r-', label='Шар 2', linewidth=2)
+    ax4.set_xlabel('Время (с)')
+    ax4.set_ylabel('Скорость (м/с)')
+    ax4.set_title('Изменение скоростей шаров')
+    ax4.legend()
+    ax4.grid(True, alpha=0.3)
 
     plt.tight_layout()
     plt.show()
 
+    # Дополнительный анализ
+    print(f"\nДОПОЛНИТЕЛЬНЫЙ АНАЛИЗ:")
+    print(f"Общее время симуляции: {time[-1]:.2f} с")
+    print(f"Количество временных шагов: {len(time)}")
+    print(f"Максимальная скорость шара 1: {np.max(ball1_speed):.3f} м/с")
+    print(f"Максимальная скорость шара 2: {np.max(ball2_speed):.3f} м/с")
+    print(f"Средняя энергия системы: {np.mean(energy):.6f} Дж")
+    print(f"Стандартное отклонение энергии: {np.std(energy):.6f} Дж")
+
 
 def main():
-    print("Запуск автотестов...")
-    run_autotests(verbose=True)
-    print("\nАвтотесты завершены успешно!")
+    # Получаем параметры от пользователя
+    law_type, k, exponent, damping, ball1_params, ball2_params = get_user_input()
 
-    while True:
-        try:
-            print("\n" + "=" * 50)
-            print("НАСТРОЙКА ПАРАМЕТРОВ МОДЕЛИРОВАНИЯ")
-            print("=" * 50)
+    # Создаём игру с выбранными параметрами
+    game = BilliardGame(law_type, k, exponent, damping)
+    game.setup_game(ball1_params, ball2_params)
 
-            params = get_user_input()
-            sim_params = get_simulation_params()
+    # Настраиваем график для анимации
+    fig, ax = plt.subplots(figsize=(12, 6))
+    frames_to_simulate = 500
 
-            print("\nЗапуск моделирования...")
+    def animate(frame):
+        ax.clear()
 
-            if params['type'] == 'two_balls':
-                b1 = Ball(params['m'], params['R'], params['ball1']['x'], params['ball1']['v'])
-                b2 = Ball(params['m'], params['R'], params['ball2']['x'], params['ball2']['v'])
-                results = simulate_two_balls(b1, b2, k=sim_params['k'], p=sim_params['p'], t_max=sim_params['t_max'])
-            else:
-                results = simulate_ball_wall(
-                    m=params['m'], R=params['R'], x=params['ball']['x'], v=params['ball']['v'],
-                    n_unit=params['wall']['normal'], x0_on_plane=np.array([params['wall']['position'], 0.0]),
-                    k=sim_params['k'], p=sim_params['p'], t_max=sim_params['t_max']
-                )
+        # Настраиваем график
+        ax.set_xlim(-0.1, game.table.width + 0.1)
+        ax.set_ylim(-0.1, game.table.height + 0.1)
+        ax.set_aspect('equal')
 
-            print("Моделирование завершено. Построение графика...")
-            plot_billiard_table(results, params, sim_params)
+        law_names = {
+            'elastic': 'Абсолютно упругие столкновения',
+            'hooke': f'Закон Гука (k={k}, n={exponent})',
+            'hertz': f'Закон Герца (k={k})'
+        }
+        ax.set_title(f'Бильярд: {law_names[law_type]} - Время: {game.time:.2f} с')
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.grid(True, alpha=0.3)
 
-            cont = input("\nПровести еще одно моделирование? (y/n): ").strip().lower()
-            if cont not in ['y', 'д']:
-                print("Выход из программы.")
-                break
+        # Рисуем лузы
+        for pocket in game.table.pockets:
+            circle = plt.Circle(pocket, game.table.pocket_radius, color='black', alpha=0.5)
+            ax.add_patch(circle)
 
-        except KeyboardInterrupt:
-            print("\n\nПрограмма прервана пользователем.")
-            break
-        except Exception as e:
-            print(f"\nОшибка: {e}")
-            print("Попробуйте еще раз.")
+        # Рисуем границы стола
+        table_rect = plt.Rectangle((0, 0), game.table.width, game.table.height,
+                                   fill=False, edgecolor='brown', linewidth=3)
+        ax.add_patch(table_rect)
+
+        # Обновляем симуляцию
+        game.update()
+
+        # Рисуем шары
+        for ball in game.balls:
+            circle = plt.Circle(ball.position, ball.radius, color=ball.color,
+                                edgecolor='black', linewidth=2)
+            ax.add_patch(circle)
+
+            # Рисуем след
+            if len(ball.trail) > 1:
+                trail = np.array(ball.trail)
+                ax.plot(trail[:, 0], trail[:, 1], color=ball.color, alpha=0.5, linewidth=1)
+
+        # Отображаем информацию
+        energy = game.calculate_energy()
+        momentum = game.calculate_momentum()
+
+        ax.text(0.02, 0.98, f'Время: {game.time:.2f} с',
+                transform=ax.transAxes, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        ax.text(0.02, 0.92, f'Энергия: {energy:.3f} Дж',
+                transform=ax.transAxes, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        ax.text(0.02, 0.86, f'Импульс: ({momentum[0]:.2f}, {momentum[1]:.2f})',
+                transform=ax.transAxes, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+    print(f"\nЗапуск симуляции с параметрами:")
+    print(f"Закон: {law_type}")
+    print(f"Шар 1: масса={ball1_params['mass']}, радиус={ball1_params['radius']}, цвет={ball1_params['color']}")
+    print(f"Шар 2: масса={ball2_params['mass']}, радиус={ball2_params['radius']}, цвет={ball2_params['color']}")
+    print("\nРекомендация: для стабильной работы используйте абсолютно упругие столкновения (вариант 1)")
+
+    # Запускаем анимацию
+    print("\nЗапуск анимации...")
+    anim = FuncAnimation(fig, animate, frames=frames_to_simulate, interval=50, repeat=False)
+    plt.show()
+
+    # После завершения анимации запускаем анализ результатов
+    print("\nАнимация завершена. Запуск анализа результатов...")
+    analyze_and_plot_results(game)
 
 
 if __name__ == "__main__":
