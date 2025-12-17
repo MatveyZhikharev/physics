@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
-from typing import Tuple, List, Optional
+from typing import Tuple, List
 import matplotlib.colors as mcolors
 
 
@@ -19,7 +19,6 @@ class Pendulum:
     @property
     def small_angle_period(self) -> float:
         """Период малых колебаний (теоретический)"""
-
         return 2 * np.pi * np.sqrt(self.inertia / (self.mass * 9.81 * self.length))
 
 
@@ -30,28 +29,27 @@ class PendulumSimulator:
         self.pendulum = pendulum
 
     def derivatives(self, t: float, y: np.ndarray) -> np.ndarray:
-        """ Система дифференциальных уравнений маятника
-            I * d²θ/dt² = -m*g*l*sin(θ) - b*dθ/dt """
-
+        """Правая часть системы:
+           I * d²θ/dt² = -m*g*l*sin(θ) - b*dθ/dt
+        """
         theta, omega = y
         g = 9.81
-
         alpha = (-self.pendulum.mass * g * self.pendulum.length * np.sin(theta)
                  - self.pendulum.damping * omega) / self.pendulum.inertia
-
         return np.array([omega, alpha])
 
     def energy(self, theta: float, omega: float) -> float:
         """Полная механическая энергия"""
-
         potential = self.pendulum.mass * 9.81 * self.pendulum.length * (1 - np.cos(theta))
         kinetic = 0.5 * self.pendulum.inertia * omega ** 2
         return potential + kinetic
 
-    def simulate_euler(self, theta0: float, omega0: float,
-                       t_span: Tuple[float, float], dt: float = 0.01) -> PendulumResult:
-        """Моделирование методом Эйлера"""
-
+    def simulate_verlet(self, theta0: float, omega0: float,
+                        t_span: Tuple[float, float], dt: float = 0.01) -> PendulumResult:
+        """
+        Моделирование методом Верле (Velocity Verlet).
+        Лучше сохраняет энергию, чем явный Эйлер.
+        """
         t0, t_end = t_span
         n_steps = int((t_end - t0) / dt) + 1
         t_values = np.linspace(t0, t_end, n_steps)
@@ -64,13 +62,34 @@ class PendulumSimulator:
         omega[0] = omega0
         energy_values[0] = self.energy(theta0, omega0)
 
+        # начальное ускорение
+        g = 9.81
+        I = self.pendulum.inertia
+        m = self.pendulum.mass
+        l = self.pendulum.length
+        b = self.pendulum.damping
+
+        alpha = (-m * g * l * np.sin(theta[0]) - b * omega[0]) / I
+
         for i in range(1, n_steps):
-            deriv = self.derivatives(t_values[i - 1], np.array([theta[i - 1], omega[i - 1]]))
-            theta[i] = theta[i - 1] + dt * deriv[0]
-            omega[i] = omega[i - 1] + dt * deriv[1]
+            # шаг по углу (θ)
+            theta_half = theta[i-1] + 0.5 * dt * omega[i-1]
+            # ускорение в промежуточной точке
+            alpha_half = (-m * g * l * np.sin(theta_half) - b * omega[i-1]) / I
+            # шаг по скорости
+            omega[i] = omega[i-1] + dt * alpha_half
+            # финальный шаг по углу
+            theta[i] = theta_half + 0.5 * dt * omega[i]
+
             energy_values[i] = self.energy(theta[i], omega[i])
 
         return PendulumResult(t_values, theta, omega, energy_values, self.pendulum)
+
+    # оставить старое имя для совместимости с остальным кодом
+    def simulate_euler(self, theta0: float, omega0: float,
+                       t_span: Tuple[float, float], dt: float = 0.01) -> PendulumResult:
+        """Обёртка: теперь по имени simulate_euler запускается метод Верле"""
+        return self.simulate_verlet(theta0, omega0, t_span, dt)
 
 
 class PendulumResult:
@@ -86,7 +105,6 @@ class PendulumResult:
 
     def find_periods(self) -> List[float]:
         """Нахождение периодов колебаний по нулевым пересечениям"""
-
         periods = []
         zero_crossings = []
 
@@ -103,7 +121,6 @@ class PendulumResult:
 
     def analyze_period_vs_amplitude(self) -> Tuple[np.ndarray, np.ndarray]:
         """Анализ зависимости периода от амплитуды"""
-
         periods = self.find_periods()
         if not periods:
             return np.array([]), np.array([])
@@ -137,7 +154,7 @@ def run_autotests():
 
     energy_drift = (np.max(result.energy) - np.min(result.energy)) / np.mean(result.energy)
     if energy_drift < 0.01:
-        print("Тест 1 пройден: энергия сохраняется без трения")
+        print("Тест 1 пройден: энергия почти сохраняется без трения")
     else:
         print(f"Тест 1 не пройден: дрейф энергии {energy_drift:.4f}")
 
@@ -187,7 +204,6 @@ def study_free_oscillations():
     periods_vs_amplitude = []
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-
     colors = list(mcolors.TABLEAU_COLORS.values())
 
     for i, amplitude in enumerate(amplitudes):
@@ -232,7 +248,6 @@ def study_damped_oscillations():
     print("\n=== Свободные колебания с трением ===")
 
     pendulum = create_rod_pendulum(length=1.0, mass=1.0)
-
     damping_coeffs = [0.0, 0.1, 0.3, 0.5]
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
@@ -250,7 +265,7 @@ def study_damped_oscillations():
 
         period_data, _ = result.analyze_period_vs_amplitude()
         if len(period_data) > 0:
-            avg_period = np.mean(period_data[:2])  # Берем первые 2 периода
+            avg_period = np.mean(period_data[:2])
             periods_vs_damping.append((damping, avg_period))
             print(f"Коэффициент трения: {damping:.1f}, Период: {avg_period:.3f} с")
 
@@ -392,8 +407,7 @@ def interactive_simulation():
 
 
 def main():
-    print("ФИЗИЧЕСКИЙ МАЯТНИК - МОДЕЛИРОВАНИЕ")
-    print(" ")
+    print("ФИЗИЧЕСКИЙ МАЯТНИК - МОДЕЛИРОВАНИЕ\n")
 
     run_autotests()
 
