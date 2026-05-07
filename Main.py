@@ -209,6 +209,94 @@ def main():
     plt.tight_layout()
     plt.show()
 
+# ---------- Аналитические решения ----------
+
+def C_concentric(R1, R2):
+    """Точная формула: два концентрических шара (R1 < R2)."""
+    return 4 * np.pi * EPS0 * (R1 * R2) / (R2 - R1)
+
+def C_two_spheres_series(R, d, n_terms=20):
+    """
+    Ёмкость двух одинаковых сфер при потенциалах +V/2 и -V/2.
+    Источник: Jackson, Classical Electrodynamics, задача 3.3.
+    """
+    D = d / (2 * R)
+    alpha = np.arccosh(D)
+    # правильный множитель: 2*pi*eps0, не 4*pi*eps0
+    s = sum(np.sinh(alpha) / np.sinh(n * alpha) for n in range(1, n_terms + 1))
+    return 2 * np.pi * EPS0 * R * s  # <-- был 4*pi, должно быть 2*pi
+
+def C_isolated_sphere(R):
+    """Предельный случай d -> inf для схемы ±V/2."""
+    return 2 * np.pi * EPS0 * R  # <-- аналогично
+
+def run_tests():
+    print("\n" + "=" * 55)
+    print("ТЕСТЫ: сравнение МоМ с аналитическим решением")
+    print("=" * 55)
+
+    V_test = 1.0  # разность потенциалов = 1 В (±0.5 на электродах)
+
+    # ── Тест 1: Концентрические сферы ──────────────────────────
+    print("\n[Тест 1] Концентрические сферы (R1=0.05 м, R2=0.10 м)")
+    R1, R2 = 0.05, 0.10
+
+    pos, area, eid, s1, s2 = build_two_spheres(
+        R1=R1, c1=(0, 0, 0), N1=400,
+        R2=R2, c2=(0, 0, 0), N2=400
+    )
+    q = solve_charges(pos, area, eid, V=V_test)
+    C_mom = abs(total_charge(q, eid, 0)) / V_test
+    # Точная формула: шаровой конденсатор
+    C_exact = 4 * np.pi * EPS0 * (R1 * R2) / (R2 - R1)
+
+    print(f"  МоМ:       C = {C_mom:.6e} Ф")
+    print(f"  Аналит.:   C = {C_exact:.6e} Ф")
+    print(f"  Погрешность: {abs(C_mom - C_exact) / C_exact * 100:.2f}%")
+
+    # ── Тест 2: Две раздельные одинаковые сферы ────────────────
+    print("\n[Тест 2] Две одинаковые сферы (R=0.06 м, d=0.30 м)")
+    R, d = 0.06, 0.30
+
+    pos, area, eid, s1, s2 = build_two_spheres(
+        R1=R, c1=(0, 0, 0), N1=500,
+        R2=R, c2=(d, 0, 0), N2=500
+    )
+    q = solve_charges(pos, area, eid, V=V_test)
+    C_mom = abs(total_charge(q, eid, 0)) / V_test
+
+    # Точный ряд (Jackson, Classical Electrodynamics):
+    # схема ±V/2 → коэффициент 2*pi, а не 4*pi
+    alpha = np.arccosh(d / (2 * R))
+    s = sum(np.sinh(alpha) / np.sinh(n * alpha) for n in range(1, 30))
+    C_exact = 2 * np.pi * EPS0 * R * s
+
+    print(f"  МоМ:       C = {C_mom:.6e} Ф")
+    print(f"  Аналит.:   C = {C_exact:.6e} Ф")
+    print(f"  Погрешность: {abs(C_mom - C_exact) / C_exact * 100:.2f}%")
+
+    # ── Тест 3: Уединённая сфера (вторая очень далеко) ─────────
+    print("\n[Тест 3] Уединённая сфера R=0.06 м (вторая на d=100 м)")
+    R, d = 0.06, 100.0
+
+    pos, area, eid, s1, s2 = build_two_spheres(
+        R1=R, c1=(0, 0, 0), N1=500,
+        R2=R, c2=(d, 0, 0), N2=500
+    )
+    q = solve_charges(pos, area, eid, V=V_test)
+    C_mom = abs(total_charge(q, eid, 0)) / V_test
+
+    # При d→∞: ряд из Теста 2 → sinh(alpha)/sinh(alpha) = 1 при n=1, остальные → 0
+    # итого C → 2*pi*eps0*R (предел уединённой сферы при ±V/2)
+    C_exact = 2 * np.pi * EPS0 * R
+
+    print(f"  МоМ:       C = {C_mom:.6e} Ф")
+    print(f"  Аналит.:   C = {C_exact:.6e} Ф  (2*pi*eps0*R)")
+    print(f"  Погрешность: {abs(C_mom - C_exact) / C_exact * 100:.2f}%")
+
+    print("\n" + "=" * 55)
+
 
 if __name__ == "__main__":
+    run_tests()
     main()
